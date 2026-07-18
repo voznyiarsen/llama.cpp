@@ -155,3 +155,5 @@ AGENTS.local.md
 .pi/SYSTEM.md
 deploy-android.sh
 bug-report-powervr-kquant.md
+howitworks/
+vulkangpu/
