@@ -8945,11 +8945,21 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
         dmmv = ggml_vk_get_64b_indexing_pipeline(ctx, dmmv);
     }
 
-    const bool qx_needs_dequant = x_non_contig;
     const bool qy_needs_dequant = !quantize_y && ((src1->type != GGML_TYPE_F16 && !f16_f32_kernel) || y_non_contig);
 
     // Not implemented
     GGML_ASSERT(y_non_contig || !qy_needs_dequant);  // NOLINT
+
+    bool qx_needs_dequant = x_non_contig;
+
+    if (dmmv == nullptr) {
+        dmmv = ggml_vk_get_dequantize_mul_mat_vec(ctx, GGML_TYPE_F16, src1->type, ne11, ne20, ne00);
+        qx_needs_dequant = true;
+        quantize_y = false;
+        if (!x_non_contig) {
+            to_fp16_vk_0 = ggml_vk_get_to_fp16(ctx, src0->type);
+        }
+    }
 
     GGML_ASSERT(!qx_needs_dequant || to_fp16_vk_0 != nullptr);  // NOLINT
     GGML_ASSERT(!qy_needs_dequant || to_fp16_vk_1 != nullptr);  // NOLINT
@@ -8959,7 +8969,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
     const uint64_t y_ne = ggml_nelements(src1);
 
     const uint64_t qx_sz = ggml_vk_align_size(ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type), ctx->device->properties.limits.minStorageBufferOffsetAlignment);
-    const uint64_t x_sz = x_non_contig ? ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment) : qx_sz;
+    const uint64_t x_sz = x_non_contig ? ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment) : (qx_needs_dequant ? sizeof(ggml_fp16_t) * x_ne : qx_sz);
     const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) :
                          (f16_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
 
@@ -9007,13 +9017,19 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
         d_Y = d_Qy;
     }
 
-    if (x_non_contig) {
+    if (qx_needs_dequant) {
         if (ctx->prealloc_x_need_sync) {
             ggml_vk_sync_buffers(ctx, subctx);
         }
 
-        GGML_ASSERT(x_sz == ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment));
-        ggml_vk_cpy_to_contiguous(ctx, subctx, to_fp16_vk_0, src0, d_Qx, d_X);
+        if (x_non_contig) {
+            GGML_ASSERT(x_sz == ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment));
+            ggml_vk_cpy_to_contiguous(ctx, subctx, to_fp16_vk_0, src0, d_Qx, d_X);
+        } else {
+            const std::vector<uint32_t> pc = { (uint32_t)ne01, (uint32_t)ne10, (uint32_t)ne10, (uint32_t)ne10, (uint32_t)(ggml_nelements(src0)) };
+            ggml_vk_dispatch_pipeline(ctx, subctx, to_fp16_vk_0, { d_Qx, d_X }, pc, { (uint32_t)(x_ne), 1, 1});
+            ggml_vk_sync_buffers(ctx, subctx);
+        }
     }
     if (y_non_contig) {
         GGML_ASSERT(y_sz == ggml_type_size(src1->type) * y_ne);
@@ -9110,7 +9126,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
         base_work_group_y += groups_y;
     }
 
-    if (x_non_contig) {
+    if (qx_needs_dequant) {
         ctx->prealloc_x_need_sync = true;
     }
     if (y_non_contig || quantize_y) {
@@ -9836,11 +9852,21 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
         quantize_y = false;
     }
 
+    bool qx_needs_dequant = x_non_contig;
+
+    if (dmmv == nullptr) {
+        dmmv = ggml_vk_get_dequantize_mul_mat_vec_id(ctx, GGML_TYPE_F16, src1->type, ne20, ne00);
+        qx_needs_dequant = true;
+        quantize_y = false;
+        if (!x_non_contig) {
+            to_fp16_vk_0 = ggml_vk_get_to_fp16(ctx, src0->type);
+        }
+    }
+
     if (quantize_y) {
         to_q8_1 = ggml_vk_get_quantize_pipeline(ctx, GGML_TYPE_Q8_1);
     }
 
-    const bool qx_needs_dequant = x_non_contig;
     const bool qy_needs_dequant = !quantize_y && ((src1->type != GGML_TYPE_F16 && !f16_f32_kernel) || y_non_contig);
 
     if (ggml_nbytes(src0) > ctx->device->properties.limits.maxStorageBufferRange) {
@@ -9857,7 +9883,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
     const uint64_t y_ne = ggml_nelements(src1);
 
     const uint64_t qx_sz = ggml_vk_align_size(ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type), ctx->device->properties.limits.minStorageBufferOffsetAlignment);
-    const uint64_t x_sz = x_non_contig ? ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment) : qx_sz;
+    const uint64_t x_sz = x_non_contig ? ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment) : (qx_needs_dequant ? sizeof(ggml_fp16_t) * x_ne : qx_sz);
     const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) :
                                        (f16_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
 
@@ -9913,9 +9939,15 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
         }
     }
 
-    if (x_non_contig) {
-        GGML_ASSERT(x_sz == ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment));
-        ggml_vk_cpy_to_contiguous(ctx, subctx, to_fp16_vk_0, src0, d_Qx, d_X);
+    if (qx_needs_dequant) {
+        if (x_non_contig) {
+            GGML_ASSERT(x_sz == ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment));
+            ggml_vk_cpy_to_contiguous(ctx, subctx, to_fp16_vk_0, src0, d_Qx, d_X);
+        } else {
+            const std::vector<uint32_t> pc = { (uint32_t)ne01, (uint32_t)ne10, (uint32_t)ne10, (uint32_t)ne10, (uint32_t)(ggml_nelements(src0)) };
+            ggml_vk_dispatch_pipeline(ctx, subctx, to_fp16_vk_0, { d_Qx, d_X }, pc, { (uint32_t)(x_ne), 1, 1});
+            ggml_vk_sync_buffers(ctx, subctx);
+        }
     }
     if (y_non_contig) {
         GGML_ASSERT(y_sz == ggml_type_size(src1->type) * y_ne);
@@ -10004,7 +10036,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
             pc, { groups_x, (uint32_t)nei0, groups_z });
     }
 
-    if (x_non_contig) {
+    if (qx_needs_dequant) {
         ctx->prealloc_x_need_sync = true;
     }
     if (y_non_contig || quantize_y) {
